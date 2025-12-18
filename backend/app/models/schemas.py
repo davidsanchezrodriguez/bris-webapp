@@ -165,3 +165,221 @@ class SearchResult(BaseModel):
     query: str
     results: List[Source]
     total_found: int
+# Añade estos imports al inicio del archivo si no están: 
+from typing import List, Dict, Optional
+from pydantic import BaseModel, Field
+
+# ============================================================================
+# LCR (Liquidity Coverage Ratio)
+# ============================================================================
+
+class LCRRequest(BaseModel):
+    """Request for LCR calculation."""
+    # HQLA
+    hqla_level1: float = Field(..., description="Level 1 HQLA (cash, central bank reserves, sovereigns)")
+    hqla_level2a: float = Field(0, description="Level 2A HQLA (AA- corporate bonds, covered bonds)")
+    hqla_level2b: float = Field(0, description="Level 2B HQLA (BBB corporate bonds, equities)")
+    
+    # Outflows
+    retail_deposits_stable: float = Field(0, description="Stable retail deposits (5% runoff)")
+    retail_deposits_less_stable: float = Field(0, description="Less stable retail deposits (10% runoff)")
+    wholesale_operational:  float = Field(0, description="Operational wholesale deposits (25% runoff)")
+    wholesale_non_operational: float = Field(0, description="Non-operational wholesale (40% runoff)")
+    secured_funding: float = Field(0, description="Secured funding outflows")
+    other_outflows: float = Field(0, description="Other contractual outflows")
+    
+    # Inflows
+    retail_inflows: float = Field(0, description="Retail inflows")
+    wholesale_inflows: float = Field(0, description="Wholesale inflows")
+    other_inflows: float = Field(0, description="Other contractual inflows")
+
+
+class LCRResult(BaseModel):
+    """Result of LCR calculation."""
+    lcr: float
+    lcr_percent: str
+    compliant: bool
+    buffer_to_minimum: float
+    hqla_total: float
+    hqla_adjusted: float
+    total_outflows: float
+    total_inflows: float
+    net_outflows: float
+    hqla_breakdown: Dict[str, float]
+    outflow_breakdown: Dict[str, float]
+    inflow_breakdown:  Dict[str, float]
+    caps_applied: Dict[str, str]
+
+
+# ============================================================================
+# NSFR (Net Stable Funding Ratio)
+# ============================================================================
+
+class NSFRRequest(BaseModel):
+    """Request for NSFR calculation."""
+    # Available Stable Funding (ASF)
+    capital_long_term_debt: float = Field(0, description="Capital and debt >1 year (100% ASF)")
+    stable_retail_deposits: float = Field(0, description="Stable retail deposits (95% ASF)")
+    less_stable_deposits: float = Field(0, description="Less stable deposits (90% ASF)")
+    wholesale_funding_short:  float = Field(0, description="Wholesale funding <1 year (50% ASF)")
+    other_liabilities: float = Field(0, description="Other liabilities (0% ASF)")
+    
+    # Required Stable Funding (RSF)
+    cash_and_reserves: float = Field(0, description="Cash and reserves (0% RSF)")
+    hqla_level1: float = Field(0, description="HQLA Level 1 (5% RSF)")
+    hqla_level2: float = Field(0, description="HQLA Level 2 (15% RSF)")
+    loans_to_fi_short: float = Field(0, description="Loans to FIs <6 months (10% RSF)")
+    corporate_loans_short: float = Field(0, description="Corporate loans <1 year (50% RSF)")
+    residential_mortgages: float = Field(0, description="Residential mortgages (65% RSF)")
+    other_loans_long:  float = Field(0, description="Other loans >1 year (85% RSF)")
+    npl_assets: float = Field(0, description="Non-performing assets (100% RSF)")
+    other_assets: float = Field(0, description="Other assets (100% RSF)")
+
+
+class NSFRResult(BaseModel):
+    """Result of NSFR calculation."""
+    nsfr: float
+    nsfr_percent: str
+    compliant: bool
+    buffer_to_minimum: float
+    total_asf: float
+    total_rsf: float
+    asf_breakdown: Dict[str, float]
+    rsf_breakdown: Dict[str, float]
+
+
+# ============================================================================
+# MREL/TLAC Calculator
+# ============================================================================
+
+class MRELRequest(BaseModel):
+    """Request for MREL/TLAC calculation."""
+    cet1_capital: float = Field(... , description="CET1 Capital")
+    at1_capital: float = Field(0, description="Additional Tier 1 Capital")
+    tier2_capital: float = Field(0, description="Tier 2 Capital")
+    senior_non_preferred:  float = Field(0, description="Senior non-preferred debt")
+    other_eligible:  float = Field(0, description="Other MREL-eligible instruments")
+    total_rwa: float = Field(... , description="Total Risk-Weighted Assets")
+    leverage_exposure: float = Field(... , description="Leverage Exposure Measure")
+    mrel_requirement_rwa: float = Field(0.18, description="MREL requirement as % of RWA")
+    mrel_requirement_lem: float = Field(0.0675, description="MREL requirement as % of LEM")
+    subordination_requirement: float = Field(0.08, description="Subordination requirement as % of RWA")
+
+
+class MRELResult(BaseModel):
+    """Result of MREL/TLAC calculation."""
+    total_mrel: float
+    mrel_ratio_rwa: float
+    mrel_ratio_rwa_percent: str
+    mrel_ratio_lem: float
+    mrel_ratio_lem_percent: str
+    subordinated_amount: float
+    subordination_ratio: float
+    subordination_ratio_percent: str
+    compliant_rwa: bool
+    compliant_lem: bool
+    compliant_subordination: bool
+    overall_compliant: bool
+    buffer_rwa: float
+    buffer_lem: float
+    buffer_subordination: float
+    breakdown: Dict[str, float]
+
+
+# ============================================================================
+# CVA Risk Calculator (SA-CVA Basic)
+# ============================================================================
+
+class CounterpartyExposure(BaseModel):
+    """Single counterparty exposure for CVA."""
+    name: str
+    sector: str = Field(..., description="financial, corporate, sovereign")
+    rating: str = Field(..., description="AAA, AA, A, BBB, BB, B, CCC")
+    ead: float = Field(... , description="Exposure at Default")
+    maturity: float = Field(..., description="Effective maturity in years")
+    hedge_notional: float = Field(0, description="CDS hedge notional")
+
+
+class CVARequest(BaseModel):
+    """Request for CVA risk calculation."""
+    counterparties: List[CounterpartyExposure]
+
+
+class CVAResult(BaseModel):
+    """Result of CVA calculation."""
+    total_cva_capital: float
+    cva_capital_by_counterparty: List[Dict[str, float]]
+    total_ead: float
+    hedging_benefit: float
+    aggregate_risk_weight: float
+
+
+# ============================================================================
+# Large Exposures Calculator
+# ============================================================================
+
+class LargeExposure(BaseModel):
+    """Single large exposure entry."""
+    group_name: str
+    gross_exposure: float
+    collateral:  float = 0
+    guarantees: float = 0
+
+
+class LargeExposuresRequest(BaseModel):
+    """Request for large exposures calculation."""
+    exposures: List[LargeExposure]
+    tier1_capital: float = Field(..., description="Eligible Tier 1 Capital")
+    is_gsib: bool = Field(False, description="Is the entity a G-SIB")
+
+
+class LargeExposuresResult(BaseModel):
+    """Result of large exposures calculation."""
+    exposures_detail: List[Dict]
+    large_exposures_count: int
+    breaches_count: int
+    total_concentration: float
+    tier1_capital: float
+    limit_percent: float
+
+
+# ============================================================================
+# IRRBB Calculator
+# ============================================================================
+
+class IRRBBRequest(BaseModel):
+    """Request for IRRBB calculation."""
+    # Rate-sensitive gaps by time bucket (in EUR millions)
+    gap_overnight: float = Field(0)
+    gap_1m: float = Field(0)
+    gap_3m: float = Field(0)
+    gap_6m: float = Field(0)
+    gap_1y: float = Field(0)
+    gap_2y: float = Field(0)
+    gap_3y: float = Field(0)
+    gap_5y: float = Field(0)
+    gap_7y: float = Field(0)
+    gap_10y: float = Field(0)
+    gap_15y: float = Field(0)
+    gap_20y_plus: float = Field(0)
+    tier1_capital: float = Field(... , description="Tier 1 Capital for threshold comparison")
+
+
+class IRRBBScenarioResult(BaseModel):
+    """Result for a single IRRBB scenario."""
+    scenario_name: str
+    delta_eve: float
+    delta_eve_percent_tier1: str
+    breaches_threshold: bool
+
+
+class IRRBBResult(BaseModel):
+    """Result of IRRBB calculation."""
+    scenarios: List[IRRBBScenarioResult]
+    worst_scenario: str
+    worst_delta_eve: float
+    worst_delta_eve_percent:  str
+    tier1_capital: float
+    threshold_percent: float
+    overall_compliant: bool
+    gap_profile: Dict[str, float]
