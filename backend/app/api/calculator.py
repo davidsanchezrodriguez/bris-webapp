@@ -367,3 +367,441 @@ async def calculate_rwa(request: RWARequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+# ============================================================================
+# LCR Calculator
+# ============================================================================
+
+@router.post("/lcr", response_model=LCRResult)
+async def calculate_lcr(request: LCRRequest):
+    """Calculate Liquidity Coverage Ratio."""
+    try:
+        # Apply haircuts to HQLA
+        l1_adjusted = request.hqla_level1 * 1.0  # No haircut
+        l2a_adjusted = request.hqla_level2a * 0.85  # 15% haircut
+        l2b_adjusted = request.hqla_level2b * 0.50  # 50% haircut
+        
+        # Calculate total before caps
+        hqla_total = request.hqla_level1 + request.hqla_level2a + request.hqla_level2b
+        hqla_adjusted_pre_cap = l1_adjusted + l2a_adjusted + l2b_adjusted
+        
+        # Apply caps
+        caps_applied = {}
+        
+        # L2 total cap:  max 40% of total HQLA
+        l2_total = l2a_adjusted + l2b_adjusted
+        l2_cap = l1_adjusted * (40/60)  # L2 can be max 40%, so L1 must be 60%
+        if l2_total > l2_cap:
+            reduction_factor = l2_cap / l2_total
+            l2a_adjusted *= reduction_factor
+            l2b_adjusted *= reduction_factor
+            caps_applied["L2_cap"] = f"Level 2 capped to 40% (reduced by {(1-reduction_factor)*100:.1f}%)"
+        
+        # L2B cap: max 15% of total HQLA
+        l2b_cap = (l1_adjusted + l2a_adjusted) * (15/85)
+        if l2b_adjusted > l2b_cap: 
+            caps_applied["L2B_cap"] = f"Level 2B capped to 15%"
+            l2b_adjusted = l2b_cap
+        
+        hqla_adjusted = l1_adjusted + l2a_adjusted + l2b_adjusted
+        
+        # Calculate outflows with runoff rates
+        outflows = {
+            "retail_stable": request.retail_deposits_stable * 0.05,
+            "retail_less_stable": request.retail_deposits_less_stable * 0.10,
+            "wholesale_operational": request.wholesale_operational * 0.25,
+            "wholesale_non_operational": request.wholesale_non_operational * 0.40,
+            "secured_funding": request.secured_funding,
+            "other":  request.other_outflows
+        }
+        total_outflows = sum(outflows.values())
+        
+        # Calculate inflows (capped at 75% of outflows)
+        inflows = {
+            "retail":  request.retail_inflows,
+            "wholesale": request.wholesale_inflows,
+            "other": request.other_inflows
+        }
+        total_inflows = sum(inflows.values())
+        inflow_cap = total_outflows * 0.75
+        total_inflows_capped = min(total_inflows, inflow_cap)
+        
+        if total_inflows > inflow_cap:
+            caps_applied["inflow_cap"] = f"Inflows capped at 75% of outflows"
+        
+        # Net outflows
+        net_outflows = total_outflows - total_inflows_capped
+        
+        # Calculate LCR
+        lcr = hqla_adjusted / net_outflows if net_outflows > 0 else float('inf')
+        
+        # Minimum requirement is 100%
+        minimum = 1.0
+        compliant = lcr >= minimum
+        buffer = lcr - minimum
+        
+        return LCRResult(
+            lcr=round(lcr, 4),
+            lcr_percent=f"{lcr:.2%}",
+            compliant=compliant,
+            buffer_to_minimum=round(buffer, 4),
+            hqla_total=round(hqla_total, 2),
+            hqla_adjusted=round(hqla_adjusted, 2),
+            total_outflows=round(total_outflows, 2),
+            total_inflows=round(total_inflows_capped, 2),
+            net_outflows=round(net_outflows, 2),
+            hqla_breakdown={
+                "level1": round(l1_adjusted, 2),
+                "level2a": round(l2a_adjusted, 2),
+                "level2b": round(l2b_adjusted, 2)
+            },
+            outflow_breakdown={k: round(v, 2) for k, v in outflows. items()},
+            inflow_breakdown={k: round(v, 2) for k, v in inflows.items()},
+            caps_applied=caps_applied
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# NSFR Calculator
+# ============================================================================
+
+@router.post("/nsfr", response_model=NSFRResult)
+async def calculate_nsfr(request: NSFRRequest):
+    """Calculate Net Stable Funding Ratio."""
+    try:
+        # Calculate ASF with factors
+        asf_breakdown = {
+            "capital_long_term": request.capital_long_term_debt * 1.00,
+            "stable_retail": request.stable_retail_deposits * 0.95,
+            "less_stable_deposits": request.less_stable_deposits * 0.90,
+            "wholesale_short":  request.wholesale_funding_short * 0.50,
+            "other_liabilities": request.other_liabilities * 0.00
+        }
+        total_asf = sum(asf_breakdown.values())
+        
+        # Calculate RSF with factors
+        rsf_breakdown = {
+            "cash_reserves": request.cash_and_reserves * 0.00,
+            "hqla_l1": request.hqla_level1 * 0.05,
+            "hqla_l2":  request.hqla_level2 * 0.15,
+            "loans_fi_short": request.loans_to_fi_short * 0.10,
+            "corporate_short": request.corporate_loans_short * 0.50,
+            "residential_mortgages": request.residential_mortgages * 0.65,
+            "other_loans_long":  request.other_loans_long * 0.85,
+            "npl": request.npl_assets * 1.00,
+            "other_assets": request.other_assets * 1.00
+        }
+        total_rsf = sum(rsf_breakdown.values())
+        
+        # Calculate NSFR
+        nsfr = total_asf / total_rsf if total_rsf > 0 else float('inf')
+        
+        # Minimum requirement is 100%
+        minimum = 1.0
+        compliant = nsfr >= minimum
+        buffer = nsfr - minimum
+        
+        return NSFRResult(
+            nsfr=round(nsfr, 4),
+            nsfr_percent=f"{nsfr:.2%}",
+            compliant=compliant,
+            buffer_to_minimum=round(buffer, 4),
+            total_asf=round(total_asf, 2),
+            total_rsf=round(total_rsf, 2),
+            asf_breakdown={k: round(v, 2) for k, v in asf_breakdown.items()},
+            rsf_breakdown={k: round(v, 2) for k, v in rsf_breakdown. items()}
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# MREL/TLAC Calculator
+# ============================================================================
+
+@router.post("/mrel", response_model=MRELResult)
+async def calculate_mrel(request: MRELRequest):
+    """Calculate MREL/TLAC ratios."""
+    try:
+        # Total MREL-eligible resources
+        total_mrel = (
+            request.cet1_capital +
+            request.at1_capital +
+            request. tier2_capital +
+            request.senior_non_preferred +
+            request.other_eligible
+        )
+        
+        # Subordinated amount (CET1 + AT1 + T2)
+        subordinated = request.cet1_capital + request.at1_capital + request.tier2_capital
+        
+        # Calculate ratios
+        mrel_ratio_rwa = total_mrel / request.total_rwa if request.total_rwa > 0 else 0
+        mrel_ratio_lem = total_mrel / request. leverage_exposure if request.leverage_exposure > 0 else 0
+        subordination_ratio = subordinated / request.total_rwa if request.total_rwa > 0 else 0
+        
+        # Check compliance
+        compliant_rwa = mrel_ratio_rwa >= request.mrel_requirement_rwa
+        compliant_lem = mrel_ratio_lem >= request.mrel_requirement_lem
+        compliant_sub = subordination_ratio >= request. subordination_requirement
+        
+        return MRELResult(
+            total_mrel=round(total_mrel, 2),
+            mrel_ratio_rwa=round(mrel_ratio_rwa, 4),
+            mrel_ratio_rwa_percent=f"{mrel_ratio_rwa:.2%}",
+            mrel_ratio_lem=round(mrel_ratio_lem, 4),
+            mrel_ratio_lem_percent=f"{mrel_ratio_lem:.2%}",
+            subordinated_amount=round(subordinated, 2),
+            subordination_ratio=round(subordination_ratio, 4),
+            subordination_ratio_percent=f"{subordination_ratio:.2%}",
+            compliant_rwa=compliant_rwa,
+            compliant_lem=compliant_lem,
+            compliant_subordination=compliant_sub,
+            overall_compliant=compliant_rwa and compliant_lem and compliant_sub,
+            buffer_rwa=round(mrel_ratio_rwa - request.mrel_requirement_rwa, 4),
+            buffer_lem=round(mrel_ratio_lem - request.mrel_requirement_lem, 4),
+            buffer_subordination=round(subordination_ratio - request.subordination_requirement, 4),
+            breakdown={
+                "cet1":  request.cet1_capital,
+                "at1": request.at1_capital,
+                "tier2": request.tier2_capital,
+                "senior_non_preferred": request.senior_non_preferred,
+                "other_eligible": request.other_eligible
+            }
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# CVA Risk Calculator (SA-CVA Basic Approach)
+# ============================================================================
+
+# Risk weights by rating for SA-CVA
+CVA_RISK_WEIGHTS = {
+    "AAA": 0.007,
+    "AA": 0.008,
+    "A": 0.010,
+    "BBB": 0.020,
+    "BB": 0.030,
+    "B":  0.050,
+    "CCC": 0.100
+}
+
+@router.post("/cva", response_model=CVAResult)
+async def calculate_cva_risk(request: CVARequest):
+    """Calculate CVA capital using SA-CVA Basic Approach."""
+    try:
+        cva_by_counterparty = []
+        total_ead = 0
+        total_hedging_benefit = 0
+        
+        for cp in request.counterparties:
+            # Get risk weight based on rating
+            rw = CVA_RISK_WEIGHTS.get(cp.rating. upper(), 0.10)
+            
+            # Discount factor approximation
+            df = max(1, cp.maturity)
+            
+            # CVA capital for this counterparty
+            cva_capital = 2. 33 * rw * df * cp. ead
+            
+            # Hedging benefit (simplified)
+            hedge_benefit = min(cp.hedge_notional, cp. ead) * rw * 0.5
+            
+            net_cva = max(0, cva_capital - hedge_benefit)
+            
+            cva_by_counterparty. append({
+                "name": cp.name,
+                "ead": cp.ead,
+                "rating": cp.rating,
+                "risk_weight": rw,
+                "cva_capital_gross": round(cva_capital, 2),
+                "hedge_benefit": round(hedge_benefit, 2),
+                "cva_capital_net": round(net_cva, 2)
+            })
+            
+            total_ead += cp.ead
+            total_hedging_benefit += hedge_benefit
+        
+        # Aggregate with correlation (simplified - assuming 25% correlation)
+        sum_squared = sum((x["cva_capital_net"] ** 2) for x in cva_by_counterparty)
+        sum_cva = sum(x["cva_capital_net"] for x in cva_by_counterparty)
+        
+        rho = 0.25
+        total_cva = ((rho * sum_cva) ** 2 + (1 - rho) * sum_squared) ** 0.5
+        
+        # Average risk weight
+        avg_rw = total_cva / total_ead if total_ead > 0 else 0
+        
+        return CVAResult(
+            total_cva_capital=round(total_cva, 2),
+            cva_capital_by_counterparty=cva_by_counterparty,
+            total_ead=round(total_ead, 2),
+            hedging_benefit=round(total_hedging_benefit, 2),
+            aggregate_risk_weight=round(avg_rw, 4)
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# Large Exposures Calculator
+# ============================================================================
+
+@router.post("/large-exposures", response_model=LargeExposuresResult)
+async def calculate_large_exposures(request: LargeExposuresRequest):
+    """Calculate large exposures and check limits."""
+    try:
+        # Limit is 25% for normal entities, 10% for G-SIB to G-SIB
+        limit_percent = 0.10 if request.is_gsib else 0.25
+        
+        exposures_detail = []
+        large_count = 0
+        breach_count = 0
+        total_concentration = 0
+        
+        for exp in request.exposures:
+            net_exposure = exp.gross_exposure - exp.collateral - exp.guarantees
+            net_exposure = max(0, net_exposure)  # Can't be negative
+            
+            exposure_percent = net_exposure / request.tier1_capital if request.tier1_capital > 0 else 0
+            
+            is_large = exposure_percent >= 0.10  # >10% is large exposure
+            is_breach = exposure_percent > limit_percent
+            
+            if is_large: 
+                large_count += 1
+                total_concentration += exposure_percent
+            
+            if is_breach:
+                breach_count += 1
+            
+            exposures_detail.append({
+                "group_name": exp.group_name,
+                "gross_exposure": exp.gross_exposure,
+                "collateral": exp.collateral,
+                "guarantees": exp. guarantees,
+                "net_exposure": round(net_exposure, 2),
+                "percent_of_tier1": round(exposure_percent, 4),
+                "percent_of_tier1_display": f"{exposure_percent:.2%}",
+                "is_large_exposure": is_large,
+                "is_breach": is_breach,
+                "limit":  f"{limit_percent:. 0%}"
+            })
+        
+        return LargeExposuresResult(
+            exposures_detail=exposures_detail,
+            large_exposures_count=large_count,
+            breaches_count=breach_count,
+            total_concentration=round(total_concentration, 4),
+            tier1_capital=request.tier1_capital,
+            limit_percent=limit_percent
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ============================================================================
+# IRRBB Calculator
+# ============================================================================
+
+# Shock scenarios (in basis points)
+IRRBB_SCENARIOS = {
+    "parallel_up": {"ON": 200, "1M": 200, "3M": 200, "6M": 200, "1Y": 200, "2Y": 200, "3Y": 200, "5Y":  200, "7Y": 200, "10Y": 200, "15Y":  200, "20Y+": 200},
+    "parallel_down": {"ON": -200, "1M": -200, "3M": -200, "6M": -200, "1Y": -200, "2Y": -200, "3Y":  -200, "5Y": -200, "7Y": -200, "10Y": -200, "15Y": -200, "20Y+": -200},
+    "steepener": {"ON": -100, "1M": -90, "3M": -80, "6M": -60, "1Y": -40, "2Y": 0, "3Y": 20, "5Y": 40, "7Y": 60, "10Y": 80, "15Y": 100, "20Y+": 100},
+    "flattener": {"ON": 100, "1M": 90, "3M": 80, "6M": 60, "1Y": 40, "2Y": 0, "3Y": -20, "5Y":  -40, "7Y": -60, "10Y": -80, "15Y": -100, "20Y+": -100},
+    "short_rates_up": {"ON": 200, "1M": 180, "3M": 150, "6M": 100, "1Y": 60, "2Y": 30, "3Y": 10, "5Y": 0, "7Y": 0, "10Y": 0, "15Y": 0, "20Y+": 0},
+    "short_rates_down": {"ON": -200, "1M": -180, "3M": -150, "6M": -100, "1Y":  -60, "2Y": -30, "3Y": -10, "5Y": 0, "7Y": 0, "10Y": 0, "15Y": 0, "20Y+": 0}
+}
+
+# Duration approximations for each bucket
+BUCKET_DURATIONS = {
+    "ON": 0.003,
+    "1M": 0.08,
+    "3M": 0.25,
+    "6M": 0.5,
+    "1Y": 1.0,
+    "2Y": 2.0,
+    "3Y":  3.0,
+    "5Y": 5.0,
+    "7Y": 7.0,
+    "10Y": 10.0,
+    "15Y": 15.0,
+    "20Y+":  20.0
+}
+
+@router.post("/irrbb", response_model=IRRBBResult)
+async def calculate_irrbb(request:  IRRBBRequest):
+    """Calculate IRRBB under standard scenarios."""
+    try:
+        # Build gap profile
+        gaps = {
+            "ON": request.gap_overnight,
+            "1M": request.gap_1m,
+            "3M":  request.gap_3m,
+            "6M": request.gap_6m,
+            "1Y": request.gap_1y,
+            "2Y": request.gap_2y,
+            "3Y": request.gap_3y,
+            "5Y": request.gap_5y,
+            "7Y": request. gap_7y,
+            "10Y": request.gap_10y,
+            "15Y":  request.gap_15y,
+            "20Y+": request. gap_20y_plus
+        }
+        
+        # Threshold is 15% of Tier 1
+        threshold = 0.15
+        
+        scenarios_results = []
+        worst_delta = 0
+        worst_scenario = ""
+        
+        for scenario_name, shocks in IRRBB_SCENARIOS.items():
+            # Calculate delta EVE for this scenario
+            delta_eve = 0
+            for bucket, gap in gaps.items():
+                shock_bps = shocks[bucket]
+                duration = BUCKET_DURATIONS[bucket]
+                # Delta EVE = -Gap * Duration * Shock
+                delta_eve -= gap * duration * (shock_bps / 10000)
+            
+            delta_eve_pct = delta_eve / request. tier1_capital if request.tier1_capital > 0 else 0
+            breaches = abs(delta_eve_pct) > threshold
+            
+            scenarios_results.append(IRRBBScenarioResult(
+                scenario_name=scenario_name. replace("_", " ").title(),
+                delta_eve=round(delta_eve, 2),
+                delta_eve_percent_tier1=f"{delta_eve_pct:. 2%}",
+                breaches_threshold=breaches
+            ))
+            
+            if abs(delta_eve) > abs(worst_delta):
+                worst_delta = delta_eve
+                worst_scenario = scenario_name. replace("_", " ").title()
+        
+        worst_pct = worst_delta / request. tier1_capital if request.tier1_capital > 0 else 0
+        overall_compliant = all(not s. breaches_threshold for s in scenarios_results)
+        
+        return IRRBBResult(
+            scenarios=scenarios_results,
+            worst_scenario=worst_scenario,
+            worst_delta_eve=round(worst_delta, 2),
+            worst_delta_eve_percent=f"{worst_pct:.2%}",
+            tier1_capital=request.tier1_capital,
+            threshold_percent=threshold,
+            overall_compliant=overall_compliant,
+            gap_profile=gaps
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
